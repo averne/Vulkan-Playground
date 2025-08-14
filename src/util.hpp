@@ -21,6 +21,8 @@ namespace util {
 
 #define UNUSED(...) ::util::unused(__VA_ARGS__)
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((*arr)))
+
 #define VK_CHECK(expr) ({                                               \
     if (auto _res_ = (expr); _res_ !=  vk::Result::eSuccess) {          \
         std::println(STRING(expr) ": error {}", vk::to_string(_res_));  \

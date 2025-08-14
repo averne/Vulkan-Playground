@@ -9,7 +9,7 @@
 
 #include "util.hpp"
 
-std::array layers = {
+const char *layers[] = {
 #ifdef DEBUG
     "VK_LAYER_KHRONOS_validation",
 #endif
@@ -41,7 +41,7 @@ void idct(MacroBlockDouble &in, MacroBlockDouble &out) {
 int main(int argc, char **argv) {
     // Create device and initialize base objects
     auto app_info             = vk::ApplicationInfo("ProRes-iDCT", 0, "", 0, VK_API_VERSION_1_2);
-    auto instance_create_info = vk::InstanceCreateInfo(vk::InstanceCreateFlags(), &app_info, layers);
+    auto instance_create_info = vk::InstanceCreateInfo(vk::InstanceCreateFlags(), &app_info, ARRAY_SIZE(layers), layers);
 
     auto instance = VK_CHECK_RV(vk::createInstanceUnique(instance_create_info));
     auto physdev  = VK_CHECK_RV(instance->enumeratePhysicalDevices()).front();
