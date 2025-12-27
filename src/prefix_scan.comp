@@ -1,0 +1,225 @@
+#version 450
+
+// #define HAS_SUBGROUP_ARITHMETIC
+
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_buffer_reference: require
+#extension GL_EXT_buffer_reference2: require
+
+#extension GL_KHR_shader_subgroup_vote: enable
+#extension GL_KHR_shader_subgroup_ballot: enable
+#extension GL_KHR_shader_subgroup_shuffle: enable
+#extension GL_KHR_shader_subgroup_shuffle_relative: enable
+
+#ifdef HAS_SUBGROUP_ARITHMETIC
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#endif
+
+
+#define SUBGROUP_SIZE  32
+#define NUM_SUBGROUPS  8
+#define WORKGROUP_SIZE (SUBGROUP_SIZE * NUM_SUBGROUPS)
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+layout(buffer_reference, buffer_reference_align = 1) buffer u8buf {
+    uint8_t v;
+};
+
+layout(buffer_reference, buffer_reference_align = 4) buffer u32buf {
+    uint32_t v;
+};
+
+layout(buffer_reference, buffer_reference_align = 8) buffer u64buf {
+    uint64_t v;
+};
+
+layout(push_constant) uniform pushConstants {
+    u8buf  inbuf;
+    u32buf outbuf;
+    u64buf tmpbuf;
+
+    uint array_size;
+};
+
+#define STATUS_INVALID   uint32_t(0)
+#define STATUS_AGGREGATE uint32_t(1)
+#define STATUS_PREFIX    uint32_t(2)
+
+shared uint32_t subgroup_partials[NUM_SUBGROUPS];
+
+uint64_t pack64(uint32_t x, uint32_t y) {
+    return (uint64_t(x) << 32) | (uint64_t(y) << 0);
+}
+
+uint32_t subgroup_reduce_sum(uint32_t v) {
+#ifdef HAS_SUBGROUP_ARITHMETIC
+    return subgroupAdd(v);
+#else
+    for (uint mask = gl_SubgroupSize >> 1; mask > 0; mask >>= 1) {
+        v += subgroupShuffleXor(v, mask);
+    }
+    return v;
+#endif
+}
+
+int subgroup_reduce_max(int v) {
+#ifdef HAS_SUBGROUP_ARITHMETIC
+    return subgroupMax(v);
+#else
+    for (uint mask = gl_SubgroupSize >> 1; mask > 0; mask >>= 1) {
+        v = max(subgroupShuffleXor(v, mask), v);
+    }
+    return v;
+#endif
+}
+
+uint32_t subgroup_inclusive_add(uint32_t v) {
+#ifdef HAS_SUBGROUP_ARITHMETIC
+    return subgroupInclusiveAdd(v);
+#else
+    for (uint offset = 1; offset < gl_SubgroupSize; offset <<= 1) {
+        uint32_t s = subgroupShuffleUp(v, offset);
+        if (gl_SubgroupInvocationID >= offset)
+            v += s;
+    }
+    return v;
+#endif
+}
+
+uint32_t subgroup_exclusive_add(uint32_t v) {
+#ifdef HAS_SUBGROUP_ARITHMETIC
+    return subgroupExclusiveAdd(v);
+#else
+    return subgroup_inclusive_add(v) - v;
+#endif
+}
+
+uint32_t workgroup_reduce_sum(uint32_t v) {
+    uint siid = gl_SubgroupInvocationID, sid = gl_SubgroupID,
+        ssz = gl_SubgroupSize, nsg = gl_NumSubgroups;
+
+    uint32_t s = subgroup_reduce_sum(v);
+    if (subgroupElect())
+        subgroup_partials[sid] = uint(s);
+    barrier();
+
+    uint32_t res = subgroup_reduce_sum((siid < nsg) ? subgroup_partials[siid] : 0);
+    barrier();
+
+    return res;
+}
+
+uint32_t workgroup_inclusive_add(uint32_t v) {
+    uint siid = gl_SubgroupInvocationID, sid = gl_SubgroupID, ssz = gl_SubgroupSize;
+
+    uint32_t a = subgroup_inclusive_add(v);
+    if (siid == ssz - 1)
+        subgroup_partials[sid] = a;
+    barrier();
+
+    uint32_t res = a + subgroup_reduce_sum((siid < sid) ? subgroup_partials[siid] : 0);
+    barrier();
+
+    return res;
+}
+
+bool workgroup_any(bool pred) {
+    uint siid = gl_SubgroupInvocationID, sid = gl_SubgroupID,
+        ssz = gl_SubgroupSize, nsg = gl_NumSubgroups;
+
+    bool r = subgroupAny(pred);
+    if (subgroupElect())
+        subgroup_partials[sid] = uint(r);
+    barrier();
+
+    bool res = subgroupAny(((siid < nsg) ? subgroup_partials[siid] : 0) == uint(true));
+    barrier();
+
+    return res;
+}
+
+bool workgroup_all(bool pred) {
+    uint siid = gl_SubgroupInvocationID, sid = gl_SubgroupID,
+        ssz = gl_SubgroupSize, nsg = gl_NumSubgroups;
+
+    bool r = subgroupAll(pred);
+    if (subgroupElect())
+        subgroup_partials[sid] = uint(r);
+    barrier();
+
+    bool res = subgroupAll(((siid < nsg) ? subgroup_partials[siid] : 1) == uint(true));
+    barrier();
+
+    return res;
+}
+
+uint workgroup_ballot_max_lane(bool pred) {
+    uint siid = gl_SubgroupInvocationID, sid = gl_SubgroupID,
+        ssz = gl_SubgroupSize, nsg = gl_NumSubgroups;
+
+    uint lane = subgroupBallotFindMSB(subgroupBallot(pred));
+    if (subgroupElect())
+        subgroup_partials[sid] = lane + ((int(lane) >= 0) ? sid * ssz : 0);
+    barrier();
+
+    uint32_t res = subgroup_reduce_max((siid < nsg) ? int(subgroup_partials[siid]) : -0x80000000);
+    barrier();
+
+    return res;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x, wid = gl_WorkGroupID.x, gid = gl_GlobalInvocationID.x,
+        wsz = gl_WorkGroupSize.x;
+
+    // Workgroup prefix sum
+    uint32_t thread_val = (gid < array_size) ? inbuf[gid].v : 0;
+    thread_val = workgroup_inclusive_add(thread_val);
+
+    uint32_t prefix = 0;
+    if (wid != 0) {
+        // Publish aggregate sum
+        if (lid == wsz - 1) {
+            tmpbuf[wid].v = pack64(thread_val, STATUS_AGGREGATE);
+            memoryBarrierBuffer();
+        }
+
+        // Synchronize with memory barrier return, which is when
+        // we expect records from other workgroups to arrive
+        barrier();
+
+        // Decoupled lookback
+        int status_pos = int(wid + lid - wsz);
+        while (true) {
+            memoryBarrierBuffer();
+            uint64_t status;
+            if (status_pos >= 0)
+                status = tmpbuf[status_pos].v;
+            else
+                status = pack64(0, STATUS_AGGREGATE);
+
+            uint32_t s = uint32_t(status), v = uint32_t(status >> 32);
+            if (workgroup_any(s == STATUS_INVALID)) {
+                continue;
+            } else if (workgroup_all(s == STATUS_AGGREGATE)) {
+                prefix     += workgroup_reduce_sum(v);
+                status_pos -= int(wsz);
+            } else {
+                uint lane = workgroup_ballot_max_lane(s == STATUS_PREFIX);
+                prefix += workgroup_reduce_sum((lid >= lane) ? v : 0);
+                break;
+            }
+        }
+    }
+
+    // Publish full prefix
+    if (lid == wsz - 1) {
+        tmpbuf[wid].v = pack64(thread_val + prefix, STATUS_PREFIX);
+        memoryBarrierBuffer();
+    }
+
+    // Write out result
+    if (gid < array_size)
+        outbuf[gid].v = prefix + thread_val;
+}
