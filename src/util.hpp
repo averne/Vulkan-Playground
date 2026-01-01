@@ -23,17 +23,17 @@ namespace util {
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((*arr)))
 
-#define VK_CHECK(expr) ({                                               \
-    if (auto _res_ = (expr); _res_ !=  vk::Result::eSuccess) {          \
-        std::println(STRING(expr) ": error {}", vk::to_string(_res_));  \
+#define VK_CHECK(...) ({                                               \
+    if (auto _res_ = (__VA_ARGS__); _res_ !=  vk::Result::eSuccess) {          \
+        std::printf(STRING(__VA_ARGS__) ": error %s\n", vk::to_string(_res_).data());  \
         return -1;                                                      \
     }                                                                   \
 })
 
-#define VK_CHECK_RV(expr) ({                                            \
-    auto &&[_res_, _val_] = (expr);                                     \
+#define VK_CHECK_RV(...) ({                                            \
+    auto &&[_res_, _val_] = (__VA_ARGS__);                                     \
     if (_res_ !=  vk::Result::eSuccess) {                               \
-        std::println(STRING(expr) ": error {}", vk::to_string(_res_));  \
+        std::printf(STRING(__VA_ARGS__) ": error %s\n", vk::to_string(_res_).data());  \
         return -1;                                                      \
     }                                                                   \
     std::move(_val_);                                                   \
